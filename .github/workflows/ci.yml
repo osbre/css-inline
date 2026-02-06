@@ -7,8 +7,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download source
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build C bindings
+        run: cargo build --release
+        working-directory: css-inline/bindings/c
       - name: Install Crystal
         uses: crystal-lang/install-crystal@v1
       - name: Run tests
         run: crystal spec
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/css-inline/bindings/c/target/release
