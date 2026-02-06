@@ -59,8 +59,9 @@ module CssInline
 
   class CSSInliner
     @options : LibCssInline::CssInlinerOptions
-    @base_url_bytes : Bytes?
-    @extra_css_bytes : Bytes?
+    # Hold references so GC doesn't collect the strings while C holds pointers
+    @base_url_str : String?
+    @extra_css_str : String?
     @cache : StylesheetCache?
 
     def initialize(
@@ -79,8 +80,8 @@ module CssInline
       cache : StylesheetCache? = nil
     )
       @options = LibCssInline.css_inliner_default_options
-      @base_url_bytes = nil
-      @extra_css_bytes = nil
+      @base_url_str = nil
+      @extra_css_str = nil
       @cache = nil
 
       @options.inline_style_tags = inline_style_tags unless inline_style_tags.nil?
@@ -94,74 +95,48 @@ module CssInline
       @options.apply_height_attributes = apply_height_attributes unless apply_height_attributes.nil?
       @options.preallocate_node_capacity = preallocate_node_capacity.to_u64 unless preallocate_node_capacity.nil?
 
-      unless base_url.nil?
-        @base_url_bytes = (base_url + "\0").to_slice
-        @options.base_url = @base_url_bytes.not_nil!.to_unsafe.as(LibC::Char*)
+      if url = base_url
+        @base_url_str = url
+        @options.base_url = url.to_unsafe.as(LibC::Char*)
       end
 
-      unless extra_css.nil?
-        @extra_css_bytes = (extra_css + "\0").to_slice
-        @options.extra_css = @extra_css_bytes.not_nil!.to_unsafe.as(LibC::Char*)
+      if css = extra_css
+        @extra_css_str = css
+        @options.extra_css = css.to_unsafe.as(LibC::Char*)
       end
 
-      unless cache.nil?
-        @cache = cache
-        @options.cache = pointerof(cache.@cache)
+      if c = cache
+        @cache = c
+        @options.cache = pointerof(c.@cache)
       end
     end
 
     def inline(html : String) : String
-      call_inline(html)
-    end
-
-    def inline_fragment(html : String, css : String) : String
-      call_inline_fragment(html, css)
-    end
-
-    private def call_inline(html : String) : String
-      buffer_size = Math.max(html.bytesize * 4, 4096)
-
-      loop do
-        output = Bytes.new(buffer_size)
-        result = LibCssInline.css_inline_to(
-          pointerof(@options),
-          html.to_unsafe,
-          output.to_unsafe.as(LibC::Char*),
-          buffer_size
-        )
-
-        if result == LibCssInline::CssResult::IoError && buffer_size < MAX_OUTPUT_SIZE
-          buffer_size *= 2
-          buffer_size = Math.min(buffer_size, MAX_OUTPUT_SIZE)
-          next
-        end
-
-        check_result!(result)
-        return String.new(output.to_unsafe.as(LibC::Char*))
+      with_buffer(html.bytesize) do |output, size|
+        LibCssInline.css_inline_to(pointerof(@options), html.to_unsafe, output, size)
       end
     end
 
-    private def call_inline_fragment(html : String, css : String) : String
-      buffer_size = Math.max(html.bytesize * 4, 4096)
+    def inline_fragment(html : String, css : String) : String
+      with_buffer(html.bytesize) do |output, size|
+        LibCssInline.css_inline_fragment_to(pointerof(@options), html.to_unsafe, css.to_unsafe, output, size)
+      end
+    end
+
+    private def with_buffer(input_size : Int32, &) : String
+      buffer_size = Math.max(input_size * 4, 4096)
 
       loop do
         output = Bytes.new(buffer_size)
-        result = LibCssInline.css_inline_fragment_to(
-          pointerof(@options),
-          html.to_unsafe,
-          css.to_unsafe,
-          output.to_unsafe.as(LibC::Char*),
-          buffer_size
-        )
+        result = yield output.to_unsafe.as(LibC::Char*), buffer_size
 
-        if result == LibCssInline::CssResult::IoError && buffer_size < MAX_OUTPUT_SIZE
-          buffer_size *= 2
-          buffer_size = Math.min(buffer_size, MAX_OUTPUT_SIZE)
+        if result.io_error? && buffer_size < MAX_OUTPUT_SIZE
+          buffer_size = Math.min(buffer_size * 2, MAX_OUTPUT_SIZE)
           next
         end
 
         check_result!(result)
-        return String.new(output.to_unsafe.as(LibC::Char*))
+        return String.new(output.to_unsafe)
       end
     end
 
@@ -184,8 +159,7 @@ module CssInline
         if base_url.null?
           raise Error.new("Invalid URL")
         else
-          url = String.new(base_url)
-          raise Error.new("relative URL without a base: #{url}")
+          raise Error.new("relative URL without a base: #{String.new(base_url)}")
         end
       when .invalid_extra_css?
         raise Error.new("Invalid extra CSS")
